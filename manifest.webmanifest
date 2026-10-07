@@ -1,0 +1,16 @@
+{
+  "name": "Bilancino",
+  "short_name": "Bilancino",
+  "description": "Diario privato di calorie e peso. I dati restano sul telefono.",
+  "lang": "it",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F1F5F3",
+  "theme_color": "#1E7556",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

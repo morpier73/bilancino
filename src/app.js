@@ -1,0 +1,836 @@
+"use strict";
+/* Bilancino: diario calorie e peso, tutto salvato sul dispositivo. */
+
+const STORE_KEY = "bilancino.v1";
+const MEALS = [
+  { id: "colazione", label: "Colazione" },
+  { id: "pranzo", label: "Pranzo" },
+  { id: "cena", label: "Cena" },
+  { id: "spuntini", label: "Spuntini" },
+];
+const ACTIVITY = [
+  { v: 1.2, label: "Sedentario (lavoro d'ufficio, poco movimento)" },
+  { v: 1.375, label: "Leggero (camminate, sport 1-3 volte a settimana)" },
+  { v: 1.55, label: "Moderato (sport 3-5 volte a settimana)" },
+  { v: 1.725, label: "Intenso (sport 6-7 volte a settimana)" },
+];
+const DIETS = {
+  bilanciata: { label: "Bilanciata", split: [25, 50, 25] },
+  mediterranea: { label: "Mediterranea", split: [20, 50, 30] },
+  iperproteica: { label: "Iperproteica", split: [35, 35, 30] },
+  lowcarb: { label: "Low carb", split: [30, 25, 45] },
+  keto: { label: "Chetogenica", split: [25, 5, 70] },
+};
+const MODELS = [
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5 (più preciso)" },
+  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 (più economico)" },
+];
+const WATER_GLASSES = 8;
+
+/* ---------- utilità ---------- */
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const r0 = (n) => Math.round(n || 0);
+const r1 = (n) => Math.round((n || 0) * 10) / 10;
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+const pad = (n) => String(n).padStart(2, "0");
+const dkey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const fromKey = (k) => { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); };
+const addDays = (k, n) => { const d = fromKey(k); d.setDate(d.getDate() + n); return dkey(d); };
+const todayKey = () => dkey(new Date());
+const fmtDay = (k) => {
+  const t = todayKey();
+  if (k === t) return "Oggi";
+  if (k === addDays(t, -1)) return "Ieri";
+  return fromKey(k).toLocaleDateString("it-IT", { weekday: "short", day: "numeric", month: "short" });
+};
+const fmtShort = (k) => fromKey(k).toLocaleDateString("it-IT", { day: "numeric", month: "short" });
+const fmtNum = (n, d = 1) => Number(n).toLocaleString("it-IT", { minimumFractionDigits: d, maximumFractionDigits: d });
+const parseNum = (v) => { const n = parseFloat(String(v).replace(",", ".")); return isFinite(n) ? n : 0; };
+
+/* ---------- dati ---------- */
+function emptyState() {
+  return {
+    profile: null,
+    days: {},
+    weights: [],
+    myFoods: [],
+    recent: [],
+    settings: { apiKey: "", model: MODELS[0].id },
+    demo: false,
+  };
+}
+
+function demoState() {
+  const s = emptyState();
+  s.demo = true;
+  s.profile = { sex: "m", age: 45, height: 178, weight: 88, goal: 80, activity: 1.375, rate: 0.5, diet: "mediterranea", start: addDays(todayKey(), -42) };
+  const t = todayKey();
+  // 6 settimane di pesate di esempio
+  let w = 89.6;
+  for (let i = 42; i >= 0; i -= 2) {
+    w += -0.12 + Math.sin(i * 1.7) * 0.35 - 0.05;
+    s.weights.push({ date: addDays(t, -i), kg: r1(w) });
+  }
+  const pick = (name, g, meal) => {
+    const f = FOOD_DB.find((x) => x.name === name);
+    return itemFrom(f, g, meal);
+  };
+  const plan = [
+    ["Latte parzialmente scremato", 200, "colazione"], ["Fette biscottate", 30, "colazione"], ["Marmellata", 20, "colazione"],
+    ["Pasta di semola (cruda)", 80, "pranzo"], ["Passata di pomodoro", 100, "pranzo"], ["Olio extravergine d'oliva", 10, "pranzo"], ["Parmigiano", 10, "pranzo"],
+    ["Petto di pollo", 150, "cena"], ["Zucchine", 200, "cena"], ["Pane integrale", 50, "cena"], ["Olio extravergine d'oliva", 10, "cena"],
+    ["Mela", 150, "spuntini"], ["Mandorle", 20, "spuntini"],
+  ];
+  for (let i = 6; i >= 1; i--) {
+    const k = addDays(t, -i);
+    s.days[k] = { items: plan.map(([n, g, m]) => pick(n, Math.round(g * (0.85 + ((i * 7 + g) % 5) * 0.08)), m)), water: 5 + (i % 4) };
+  }
+  s.days[t] = { items: plan.slice(0, 7).map(([n, g, m]) => pick(n, g, m)), water: 4 };
+  s.recent = ["Petto di pollo", "Mela", "Pasta di semola (cruda)", "Yogurt greco 0%", "Pane integrale"];
+  return s;
+}
+
+let state;
+try {
+  const raw = localStorage.getItem(STORE_KEY);
+  state = raw ? Object.assign(emptyState(), JSON.parse(raw)) : demoState();
+} catch (e) {
+  state = demoState();
+}
+function save() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* memoria non disponibile */ }
+}
+
+function itemFrom(food, grams, meal) {
+  const k = grams / 100;
+  return {
+    id: uid(), meal, name: food.name, grams: r0(grams),
+    kcal: r0(food.kcal * k), p: r1(food.p * k), c: r1(food.c * k), f: r1(food.f * k),
+    per: { kcal: food.kcal, p: food.p, c: food.c, f: food.f },
+    src: food.src || "db",
+  };
+}
+function day(k) {
+  if (!state.days[k]) state.days[k] = { items: [], water: 0 };
+  return state.days[k];
+}
+function totals(items) {
+  return items.reduce((a, i) => ({ kcal: a.kcal + i.kcal, p: a.p + i.p, c: a.c + i.c, f: a.f + i.f }), { kcal: 0, p: 0, c: 0, f: 0 });
+}
+function currentWeight() {
+  const w = [...state.weights].sort((a, b) => a.date.localeCompare(b.date));
+  return w.length ? w[w.length - 1].kg : state.profile?.weight;
+}
+function targets() {
+  const p = state.profile;
+  if (!p) return { kcal: 2000, p: 100, c: 250, f: 67, bmr: 0, tdee: 0 };
+  const w = currentWeight() || p.weight;
+  const bmr = 10 * w + 6.25 * p.height - 5 * p.age + (p.sex === "m" ? 5 : -161);
+  const tdee = bmr * p.activity;
+  const losing = p.goal < w;
+  const delta = (p.rate * 7700) / 7;
+  const floor = p.sex === "m" ? 1500 : 1200;
+  let kcal = losing ? Math.max(tdee - delta, floor) : p.goal > w ? tdee + delta * 0.5 : tdee;
+  kcal = Math.round(kcal / 10) * 10;
+  const [sp, sc, sf] = (DIETS[p.diet] || DIETS.bilanciata).split;
+  return { kcal, p: r0((kcal * sp) / 400), c: r0((kcal * sc) / 400), f: r0((kcal * sf) / 900), bmr: r0(bmr), tdee: r0(tdee) };
+}
+function defaultMeal() {
+  const h = new Date().getHours();
+  if (h < 11) return "colazione";
+  if (h < 15) return "pranzo";
+  if (h >= 19) return "cena";
+  return "spuntini";
+}
+function remember(name) {
+  state.recent = [name, ...state.recent.filter((n) => n !== name)].slice(0, 12);
+}
+function allFoods() {
+  return [...state.myFoods.map((f) => ({ ...f, src: "mio" })), ...FOOD_DB];
+}
+
+/* ---------- interfaccia ---------- */
+const ui = { tab: "oggi", date: todayKey(), range: 90, sheet: null };
+try { const t = localStorage.getItem(STORE_KEY + ".tab"); if (t) ui.tab = t; } catch (e) {}
+
+const ICON = {
+  left: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
+  right: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
+  plus: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  today: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2"/></svg>',
+  trend: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18l5-6 4 3 7-9"/><path d="M15 6h5v5"/></svg>',
+  foods: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11h16a8 8 0 0 1-16 0z"/><path d="M9 7c0-2 2-2 2-4M14 7c0-2 2-2 2-4"/></svg>',
+  user: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>',
+  logo: '<svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="9" width="26" height="20" rx="6" fill="var(--accent)"/><circle cx="16" cy="19" r="6" fill="var(--surface)"/><path d="M16 19l3-3.4" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/><rect x="12" y="4" width="8" height="4" rx="2" fill="var(--accent)"/></svg>',
+};
+
+function render() {
+  const app = $("#app");
+  let body = "";
+  if (ui.tab === "oggi") body = viewToday();
+  else if (ui.tab === "andamento") body = viewTrend();
+  else if (ui.tab === "cibi") body = viewFoods();
+  else body = viewProfile();
+  const showDate = ui.tab === "oggi";
+  app.innerHTML = `
+    <header class="top">
+      <div class="brand">${ICON.logo}<span>Bilancino</span></div>
+      ${showDate ? `<div class="datenav">
+        <button class="iconbtn" data-act="prev" aria-label="Giorno precedente">${ICON.left}</button>
+        <span class="label num">${esc(fmtDay(ui.date))}</span>
+        <button class="iconbtn" data-act="next" aria-label="Giorno successivo" ${ui.date >= todayKey() ? "disabled" : ""}>${ICON.right}</button>
+      </div>` : ""}
+    </header>
+    ${state.demo ? `<div class="banner"><p>Stai vedendo <b>dati di esempio</b>. Inserisci il tuo profilo e cancella gli esempi per iniziare.</p><button class="btn primary" data-act="start">Inizia da zero</button></div>` : ""}
+    ${!state.demo && !state.profile ? `<div class="banner"><p>Compila il profilo per calcolare il tuo obiettivo calorico.</p><button class="btn primary" data-act="goprofile">Apri profilo</button></div>` : ""}
+    ${body}`;
+  $("#tabbar").innerHTML = `<div class="in">
+    ${tabBtn("oggi", "Diario", ICON.today)}${tabBtn("andamento", "Peso", ICON.trend)}
+    <button class="fab" data-act="add" aria-label="Aggiungi cibo">${ICON.plus}</button>
+    ${tabBtn("cibi", "Cibi", ICON.foods)}${tabBtn("profilo", "Profilo", ICON.user)}</div>`;
+  renderSheet();
+}
+const tabBtn = (id, label, icon) => `<button class="tab ${ui.tab === id ? "on" : ""}" data-tab="${id}">${icon}<span>${label}</span></button>`;
+
+function viewToday() {
+  const d = day(ui.date);
+  const t = targets();
+  const tot = totals(d.items);
+  const left = t.kcal - tot.kcal;
+  const pct = Math.min(tot.kcal / t.kcal, 1);
+  const C = 2 * Math.PI * 56;
+  const macro = (name, val, goal, color) => `<div class="macro">
+      <div class="row between"><span>${name}</span><span class="num"><b>${r0(val)}</b> / ${goal} g</span></div>
+      <div class="bar"><i style="width:${Math.min((val / goal) * 100, 100)}%;background:${color}"></i></div></div>`;
+  const meals = MEALS.map((m) => {
+    const items = d.items.filter((i) => i.meal === m.id);
+    const mt = totals(items);
+    return `<section class="card">
+      <div class="meal-head"><h2>${m.label}</h2><span class="muted small num">${r0(mt.kcal)} kcal</span></div>
+      ${items.length ? `<ul class="items">${items.map((i) => `<li data-act="edit" data-id="${i.id}">
+          <div class="name">${esc(i.name)}${i.src === "ai" ? '<span class="tag">AI</span>' : ""}<small class="num">${i.grams ? i.grams + " g · " : ""}P ${r0(i.p)} · C ${r0(i.c)} · G ${r0(i.f)}</small></div>
+          <span class="kcal num">${r0(i.kcal)}</span></li>`).join("")}</ul>` : ""}
+      <button class="addline" data-act="add" data-meal="${m.id}">+ Aggiungi a ${m.label.toLowerCase()}</button>
+    </section>`;
+  }).join("");
+  return `
+    <section class="card">
+      <div class="summary">
+        <div class="ring ${left < 0 ? "over" : ""}">
+          <svg viewBox="0 0 132 132"><circle cx="66" cy="66" r="56" fill="none" stroke="var(--surface-2)" stroke-width="12"/>
+          <circle cx="66" cy="66" r="56" fill="none" stroke="${left < 0 ? "var(--warn)" : "var(--accent)"}" stroke-width="12" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct)}"/></svg>
+          <div class="center"><span class="big num">${Math.abs(r0(left))}</span><span class="cap">${left < 0 ? "kcal in eccesso" : "kcal rimaste"}</span></div>
+        </div>
+        <div class="macros">
+          ${macro("Proteine", tot.p, t.p, "var(--prot)")}
+          ${macro("Carboidrati", tot.c, t.c, "var(--carb)")}
+          ${macro("Grassi", tot.f, t.f, "var(--fat)")}
+        </div>
+      </div>
+      <div class="kpis num"><span><b>${t.kcal}</b>obiettivo</span><span><b>${r0(tot.kcal)}</b>mangiate</span><span><b>${d.items.length}</b>alimenti</span></div>
+    </section>
+    <section class="card">
+      <div class="row between"><h2>Acqua</h2><span class="muted small num">${d.water} / ${WATER_GLASSES} bicchieri · ${fmtNum(d.water * 0.25, 2)} l</span></div>
+      <div class="glasses">${Array.from({ length: Math.max(WATER_GLASSES, d.water + 1) }, (_, i) => `<button class="glass ${i < d.water ? "full" : ""}" data-act="water" data-n="${i}" aria-label="${i + 1} bicchieri"></button>`).join("")}</div>
+    </section>
+    ${meals}`;
+}
+
+function viewTrend() {
+  const p = state.profile;
+  const ws = [...state.weights].sort((a, b) => a.date.localeCompare(b.date));
+  const cur = currentWeight();
+  const first = ws[0]?.kg;
+  const h = p?.height ? p.height / 100 : 0;
+  const bmi = cur && h ? cur / (h * h) : 0;
+  const bmiLabel = bmi < 18.5 ? "sottopeso" : bmi < 25 ? "normopeso" : bmi < 30 ? "sovrappeso" : "obesità";
+  const t = targets();
+  // previsione dal trend delle ultime 4 settimane
+  let eta = "";
+  const recent = ws.filter((w) => w.date >= addDays(todayKey(), -28));
+  if (p && recent.length >= 3 && cur > p.goal) {
+    const n = recent.length, xs = recent.map((w) => (fromKey(w.date) - fromKey(recent[0].date)) / 864e5), ys = recent.map((w) => w.kg);
+    const mx = xs.reduce((a, b) => a + b) / n, my = ys.reduce((a, b) => a + b) / n;
+    const slope = xs.reduce((a, x, i) => a + (x - mx) * (ys[i] - my), 0) / (xs.reduce((a, x) => a + (x - mx) ** 2, 0) || 1);
+    if (slope < -0.005) {
+      const days = Math.ceil((cur - p.goal) / -slope);
+      const when = fromKey(addDays(todayKey(), days)).toLocaleDateString("it-IT", { month: "long", year: "numeric" });
+      eta = `Al ritmo delle ultime 4 settimane (${fmtNum(-slope * 7, 2)} kg a settimana) arrivi a ${fmtNum(p.goal)} kg verso <b>${when}</b>.`;
+    } else eta = "Nelle ultime 4 settimane il peso è stabile: prova a ricontrollare le porzioni.";
+  }
+  // calorie ultimi 7 giorni
+  const last7 = Array.from({ length: 7 }, (_, i) => addDays(todayKey(), i - 6));
+  const kc = last7.map((k) => totals(state.days[k]?.items || []).kcal);
+  const logged = kc.filter((x) => x > 0);
+  const avg = logged.length ? logged.reduce((a, b) => a + b) / logged.length : 0;
+  return `
+    <section class="card">
+      <div class="row between" style="align-items:flex-start">
+        <div><div class="eyebrow">Peso attuale</div><div style="font:700 34px/1.1 var(--font-display)" class="num">${cur ? fmtNum(cur) : "–"} <span style="font-size:16px" class="muted">kg</span></div></div>
+        <div style="text-align:right" class="small num">
+          ${first && cur ? `<div><b>${cur - first <= 0 ? "" : "+"}${fmtNum(cur - first)} kg</b> <span class="muted">dall'inizio</span></div>` : ""}
+          ${p ? `<div><b>${fmtNum(Math.max(cur - p.goal, 0))} kg</b> <span class="muted">all'obiettivo</span></div>` : ""}
+          ${bmi ? `<div><b>BMI ${fmtNum(bmi)}</b> <span class="muted">${bmiLabel}</span></div>` : ""}
+        </div>
+      </div>
+      <div class="chips" style="margin:14px 0 6px">${[[30, "1 mese"], [90, "3 mesi"], [365, "1 anno"], [0, "Tutto"]].map(([v, l]) => `<button class="chip ${ui.range === v ? "on" : ""}" data-act="range" data-v="${v}">${l}</button>`).join("")}</div>
+      ${weightChart(ws, p?.goal)}
+      <div class="legend"><span><i style="background:var(--accent)"></i>media 7 giorni</span><span><i style="background:var(--muted);opacity:.6"></i>pesate</span>${p ? '<span><i style="background:var(--carb)"></i>obiettivo</span>' : ""}</div>
+      ${eta ? `<p class="small" style="margin:10px 0 0">${eta}</p>` : ""}
+    </section>
+    <section class="card">
+      <h2>Registra il peso</h2>
+      <form id="wform" class="grid2" style="margin-top:10px;align-items:end">
+        <label class="f">Data<input type="date" id="wdate" value="${todayKey()}" max="${todayKey()}"></label>
+        <label class="f">Peso (kg)<input type="text" inputmode="decimal" id="wkg" placeholder="${cur ? fmtNum(cur) : "80,0"}" required></label>
+        <button class="btn primary block" style="grid-column:1/-1" type="submit">Salva pesata</button>
+      </form>
+      ${ws.length ? `<ul class="wlist" style="margin-top:10px">${ws.slice(-8).reverse().map((w) => `<li><span class="num">${fmtShort(w.date)}</span><span class="row"><b class="num">${fmtNum(w.kg)} kg</b><button data-act="delw" data-date="${w.date}" aria-label="Elimina">×</button></span></li>`).join("")}</ul>` : ""}
+    </section>
+    <section class="card">
+      <div class="row between"><h2>Calorie ultimi 7 giorni</h2><span class="small muted num">media ${r0(avg)} kcal</span></div>
+      ${kcalChart(last7, kc, t.kcal)}
+    </section>`;
+}
+
+function weightChart(ws, goal) {
+  if (ws.length < 2) return `<p class="note">Registra almeno due pesate per vedere il grafico.</p>`;
+  const from = ui.range ? addDays(todayKey(), -ui.range) : ws[0].date;
+  const pts = ws.filter((w) => w.date >= from);
+  if (pts.length < 2) return `<p class="note">Poche pesate in questo periodo: scegli un intervallo più lungo.</p>`;
+  const W = 520, H = 230, L = 44, R = 10, T = 10, B = 24;
+  const t0 = fromKey(pts[0].date).getTime(), t1 = Math.max(fromKey(pts[pts.length - 1].date).getTime(), t0 + 864e5);
+  const vals = pts.map((p) => p.kg).concat(goal && goal > Math.min(...pts.map((p) => p.kg)) - 8 ? [goal] : []);
+  let lo = Math.floor(Math.min(...vals) - 0.5), hi = Math.ceil(Math.max(...vals) + 0.5);
+  if (hi - lo < 3) hi = lo + 3;
+  const x = (k) => L + ((fromKey(k).getTime() - t0) / (t1 - t0)) * (W - L - R);
+  const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  const step = Math.max(1, Math.ceil((hi - lo) / 4));
+  let grid = "";
+  for (let v = lo; v <= hi; v += step) grid += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  // media mobile 7 giorni
+  const avg = pts.map((p) => {
+    const win = ws.filter((w) => w.date <= p.date && w.date > addDays(p.date, -7));
+    return { date: p.date, kg: win.reduce((a, w) => a + w.kg, 0) / win.length };
+  });
+  const line = avg.map((p, i) => `${i ? "L" : "M"}${x(p.date).toFixed(1)},${y(p.kg).toFixed(1)}`).join(" ");
+  const area = `${line} L${x(avg[avg.length - 1].date).toFixed(1)},${H - B} L${x(avg[0].date).toFixed(1)},${H - B} Z`;
+  const dots = pts.map((p) => `<circle cx="${x(p.date).toFixed(1)}" cy="${y(p.kg).toFixed(1)}" r="2.6" fill="var(--muted)" opacity=".55"/>`).join("");
+  const last = avg[avg.length - 1];
+  const labels = [pts[0], pts[Math.floor(pts.length / 2)], pts[pts.length - 1]].map((p, i) => `<text x="${x(p.date)}" y="${H - 6}" text-anchor="${["start", "middle", "end"][i]}">${fmtShort(p.date)}</text>`).join("");
+  const goalLine = goal && goal >= lo && goal <= hi ? `<line x1="${L}" x2="${W - R}" y1="${y(goal)}" y2="${y(goal)}" stroke="var(--carb)" stroke-width="1.5" stroke-dasharray="5 4"/>` : "";
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Grafico del peso">
+    ${grid}${goalLine}
+    <path d="${area}" fill="var(--accent)" opacity=".1"/>
+    <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+    ${dots}
+    <circle cx="${x(last.date)}" cy="${y(last.kg)}" r="5" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/>
+    ${labels}</svg>`;
+}
+
+function kcalChart(keys, vals, target) {
+  const W = 520, H = 190, L = 48, R = 10, T = 12, B = 24;
+  const hi = Math.max(target * 1.25, ...vals, 500);
+  const bw = (W - L - R) / keys.length;
+  const y = (v) => T + (1 - v / hi) * (H - T - B);
+  const step = hi > 3000 ? 1000 : 500;
+  let grid = "";
+  for (let v = 0; v <= hi; v += step) grid += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  const bars = keys.map((k, i) => {
+    const v = vals[i];
+    const color = v > target * 1.05 ? "var(--warn)" : "var(--accent)";
+    const dd = fromKey(k).toLocaleDateString("it-IT", { weekday: "short" });
+    return `${v ? `<rect x="${L + i * bw + bw * 0.2}" y="${y(v)}" width="${bw * 0.6}" height="${H - B - y(v)}" rx="4" fill="${color}" opacity="${k === todayKey() ? 1 : 0.8}"/>` : ""}
+      <text x="${L + i * bw + bw / 2}" y="${H - 6}" text-anchor="middle">${dd}</text>`;
+  }).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Calorie degli ultimi 7 giorni" style="margin-top:8px">
+    ${grid}${bars}<line x1="${L}" x2="${W - R}" y1="${y(target)}" y2="${y(target)}" stroke="var(--carb)" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="${W - R}" y="${y(target) - 5}" text-anchor="end">obiettivo ${target}</text></svg>`;
+}
+
+function viewFoods() {
+  return `
+    <section class="card">
+      <h2>I miei cibi</h2>
+      <p class="note">Cibi e ricette che hai salvato, con i valori per 100 g. Li ritrovi per primi nella ricerca.</p>
+      ${state.myFoods.length ? `<ul class="results" style="max-height:none">${state.myFoods.map((f, i) => `<li data-act="delfood" data-i="${i}"><div class="name">${esc(f.name)}<small class="num">${r0(f.kcal)} kcal · P ${r1(f.p)} · C ${r1(f.c)} · G ${r1(f.f)} per 100 g</small></div><span class="muted">×</span></li>`).join("")}</ul>` : `<p class="small muted">Nessun cibo salvato. Quando aggiungi un cibo a mano o con il codice a barre puoi salvarlo qui.</p>`}
+      <button class="btn block" style="margin-top:10px" data-act="add" data-mode="manuale">Nuovo cibo</button>
+    </section>
+    <section class="card">
+      <h2>Banca dati inclusa</h2>
+      <p class="note">${FOOD_DB.length} alimenti comuni della cucina italiana, valori indicativi per 100 g da tabelle di composizione (CREA/USDA). Per i prodotti confezionati usa il codice a barre.</p>
+    </section>`;
+}
+
+function viewProfile() {
+  const p = state.profile || { sex: "m", age: "", height: "", weight: "", goal: "", activity: 1.375, rate: 0.5, diet: "mediterranea" };
+  const t = targets();
+  const s = state.settings;
+  return `
+    <section class="card">
+      <h2>Il tuo profilo</h2>
+      <form id="pform" class="stack" style="margin-top:12px">
+        <div class="grid2">
+          <label class="f">Sesso<select id="psex"><option value="m" ${p.sex === "m" ? "selected" : ""}>Uomo</option><option value="f" ${p.sex === "f" ? "selected" : ""}>Donna</option></select></label>
+          <label class="f">Età<input type="number" id="page" min="14" max="100" value="${p.age}" required></label>
+          <label class="f">Altezza (cm)<input type="number" id="pheight" min="120" max="230" value="${p.height}" required></label>
+          <label class="f">Peso attuale (kg)<input type="text" inputmode="decimal" id="pweight" value="${p.weight ? fmtNum(currentWeight() || p.weight) : ""}" required></label>
+          <label class="f">Peso obiettivo (kg)<input type="text" inputmode="decimal" id="pgoal" value="${p.goal ? fmtNum(p.goal) : ""}" required></label>
+          <label class="f">Ritmo<select id="prate">${[[0.25, "0,25 kg a settimana"], [0.5, "0,5 kg a settimana"], [0.75, "0,75 kg a settimana"], [1, "1 kg a settimana"]].map(([v, l]) => `<option value="${v}" ${p.rate == v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        </div>
+        <label class="f">Attività fisica<select id="pact">${ACTIVITY.map((a) => `<option value="${a.v}" ${p.activity == a.v ? "selected" : ""}>${a.label}</option>`).join("")}</select></label>
+        <label class="f">Tipo di dieta<select id="pdiet">${Object.entries(DIETS).map(([k, d]) => `<option value="${k}" ${p.diet === k ? "selected" : ""}>${d.label} (P ${d.split[0]}% · C ${d.split[1]}% · G ${d.split[2]}%)</option>`).join("")}</select></label>
+        <button class="btn primary block" type="submit">Salva profilo</button>
+      </form>
+      ${state.profile ? `<div class="kpis num"><span><b>${t.bmr}</b>metabolismo basale</span><span><b>${t.tdee}</b>consumo giornaliero</span><span><b>${t.kcal}</b>obiettivo kcal</span></div>
+      <p class="note" style="margin:10px 0 0">Calcolo con la formula di Mifflin-St Jeor. L'obiettivo non scende sotto ${p.sex === "m" ? 1500 : 1200} kcal. Per diete importanti confrontati con il medico.</p>` : ""}
+    </section>
+    <section class="card">
+      <h2>Stima con l'AI</h2>
+      <p class="note">Per stimare le calorie da una foto o da una descrizione l'app usa Claude con la tua chiave API di Anthropic (console.anthropic.com). La chiave resta solo su questo telefono e viene inviata solo ad Anthropic. Ogni stima costa pochi centesimi.</p>
+      <form id="aiform" class="stack" style="margin-top:8px">
+        <label class="f">Chiave API<input type="password" id="apikey" autocomplete="off" placeholder="sk-ant-…" value="${esc(s.apiKey)}"></label>
+        <label class="f">Modello<select id="aimodel">${MODELS.map((m) => `<option value="${m.id}" ${s.model === m.id ? "selected" : ""}>${m.label}</option>`).join("")}</select></label>
+        <button class="btn block" type="submit">Salva impostazioni AI</button>
+      </form>
+    </section>
+    <section class="card">
+      <h2>I tuoi dati</h2>
+      <p class="note">Tutto è salvato solo su questo dispositivo, senza account. Fai un backup ogni tanto: se cancelli i dati del browser li perdi.</p>
+      <div class="grid2" style="margin-top:8px">
+        <button class="btn" data-act="export">Esporta backup</button>
+        <button class="btn" data-act="import">Importa backup</button>
+      </div>
+      <input type="file" id="importfile" accept="application/json,.json" hidden>
+      <div id="datamsg" class="small" style="margin-top:8px"></div>
+      <button class="btn danger block" style="margin-top:10px" data-act="reset">${ui.confirmReset ? "Tocca di nuovo per cancellare tutto" : "Cancella tutti i dati"}</button>
+    </section>`;
+}
+
+/* ---------- foglio "aggiungi" ---------- */
+function openAdd(opts = {}) {
+  ui.sheet = { kind: "add", meal: opts.meal || defaultMeal(), mode: opts.mode || "cerca", q: "", pick: null, grams: 0, ai: null, bc: null, err: "", busy: false };
+  renderSheet();
+  setTimeout(() => $("#q")?.focus(), 50);
+}
+function openEdit(id) {
+  const it = day(ui.date).items.find((i) => i.id === id);
+  if (!it) return;
+  ui.sheet = { kind: "edit", id, meal: it.meal, grams: it.grams, kcal: it.kcal };
+  renderSheet();
+}
+function closeSheet() { ui.sheet = null; renderSheet(); }
+
+function renderSheet() {
+  const host = $("#sheet");
+  const s = ui.sheet;
+  if (!s) { host.innerHTML = ""; return; }
+  let inner = "";
+  const mealChips = `<div class="chips">${MEALS.map((m) => `<button class="chip ${s.meal === m.id ? "on" : ""}" data-act="meal" data-meal="${m.id}">${m.label}</button>`).join("")}</div>`;
+  if (s.kind === "edit") {
+    const it = day(ui.date).items.find((i) => i.id === s.id);
+    inner = `<h3>${esc(it.name)}</h3>${mealChips}
+      <div class="portion" style="margin-top:12px">
+        ${it.per ? `<label class="f">Quantità (g)<input type="number" id="egrams" value="${s.grams}" min="1"></label>${nutrBlock(scale(it.per, s.grams))}` : `<label class="f">Calorie (kcal)<input type="number" id="ekcal" value="${s.kcal}" min="0"></label>`}
+      </div>
+      <div class="grid2" style="margin-top:12px"><button class="btn danger" data-act="delitem">Elimina</button><button class="btn primary" data-act="saveitem">Salva</button></div>`;
+  } else {
+    const modes = [["cerca", "Cerca"], ["ai", "Foto AI"], ["barcode", "Barcode"], ["manuale", "Manuale"]];
+    inner = `<h3>Aggiungi a ${MEALS.find((m) => m.id === s.meal).label.toLowerCase()} · ${esc(fmtDay(ui.date).toLowerCase())}</h3>${mealChips}
+      <div class="seg">${modes.map(([k, l]) => `<button class="${s.mode === k ? "on" : ""}" data-act="mode" data-mode="${k}">${l}</button>`).join("")}</div>
+      ${s.pick ? portionView(s) : s.mode === "cerca" ? searchView(s) : s.mode === "ai" ? aiView(s) : s.mode === "barcode" ? barcodeView(s) : manualView(s)}`;
+  }
+  host.innerHTML = `<div class="scrim" data-act="scrim"><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${inner}</div></div>`;
+}
+const scale = (per, g) => ({ kcal: (per.kcal * g) / 100, p: (per.p * g) / 100, c: (per.c * g) / 100, f: (per.f * g) / 100 });
+const nutrBlock = (n) => `<div class="nutr num"><span><b>${r0(n.kcal)}</b>kcal</span><span><b style="color:var(--prot)">${r1(n.p)}</b>proteine</span><span><b style="color:var(--carb)">${r1(n.c)}</b>carboidrati</span><span><b style="color:var(--fat)">${r1(n.f)}</b>grassi</span></div>`;
+
+function searchResults(q) {
+  const foods = allFoods();
+  if (!q) {
+    const rec = state.recent.map((n) => foods.find((f) => f.name === n)).filter(Boolean);
+    return { title: rec.length ? "Recenti" : "Suggeriti", list: rec.length ? rec : FOOD_DB.slice(0, 12) };
+  }
+  const norm = (x) => x.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  const words = norm(q).split(/\s+/).filter(Boolean);
+  const list = foods.filter((f) => words.every((w) => norm(f.name).includes(w)))
+    .sort((a, b) => norm(a.name).indexOf(words[0]) - norm(b.name).indexOf(words[0])).slice(0, 40);
+  return { title: `${list.length} risultati`, list };
+}
+function searchView(s) {
+  return `<input type="search" id="q" placeholder="Cerca un alimento (es. pasta, yogurt)" value="${esc(s.q)}" autocomplete="off">
+    <div id="reslist">${resultsHTML(s.q)}</div>`;
+}
+function resultsHTML(q) {
+  const r = searchResults(q);
+  ui._results = r.list;
+  return `<div class="eyebrow" style="margin-top:12px">${r.title}</div>
+    <ul class="results">${r.list.map((f, i) => `<li data-act="pick" data-i="${i}"><div class="name">${esc(f.name)}${f.src === "mio" ? '<span class="tag">MIO</span>' : ""}<small class="num">${r0(f.kcal)} kcal per 100 g${f.portion ? ` · ${f.portionLabel || "porzione"} ${f.portion} g` : ""}</small></div><span class="muted">${ICON.right}</span></li>`).join("")}</ul>
+    ${q && !r.list.length ? `<p class="note">Nessun risultato. Prova la stima con l'AI o aggiungilo a mano.</p><div class="grid2"><button class="btn" data-act="mode" data-mode="ai">Stima con AI</button><button class="btn" data-act="mode" data-mode="manuale">Aggiungi a mano</button></div>` : ""}`;
+}
+function portionView(s) {
+  const f = s.pick;
+  const quick = [...new Set([f.portion, 50, 100, 150, 200].filter(Boolean))];
+  return `<div class="portion">
+      <div class="row between"><b>${esc(f.name)}</b><button class="btn" style="padding:6px 10px" data-act="unpick">Cambia</button></div>
+      <label class="f">Quantità (g)<input type="number" id="pgrams" value="${s.grams}" min="1" inputmode="decimal"></label>
+      <div class="chips">${quick.map((g) => `<button class="chip ${s.grams == g ? "on" : ""}" data-act="grams" data-g="${g}">${g === f.portion && f.portionLabel ? f.portionLabel + " · " : ""}${g} g</button>`).join("")}</div>
+      <div id="pnutr">${nutrBlock(scale(f, s.grams))}</div>
+      ${f.src === "off" ? `<label class="row small"><input type="checkbox" id="savemine" checked> Salva tra i miei cibi</label>` : ""}
+    </div>
+    <button class="btn primary block" style="margin-top:12px" data-act="addpick">Aggiungi</button>`;
+}
+function aiView(s) {
+  const key = state.settings.apiKey;
+  if (!key) return `<p class="note">Per la stima con foto o testo serve la tua chiave API di Anthropic. Inseriscila nel profilo: resta salvata solo su questo telefono.</p><button class="btn primary block" data-act="goprofile">Apri impostazioni AI</button>`;
+  if (s.ai?.items) {
+    return `<div class="eyebrow">Stima di Claude</div>
+      ${s.ai.note ? `<p class="note" style="margin:6px 0">${esc(s.ai.note)}</p>` : ""}
+      <div>${s.ai.items.map((it, i) => `<div class="ai-item"><input type="checkbox" id="aic${i}" ${it.on ? "checked" : ""} data-act="aitoggle" data-i="${i}">
+        <label for="aic${i}"><b>${esc(it.name)}</b><br><span class="small muted num" id="aik${i}">${r0(it.kcal)} kcal · P ${r1(it.p)} · C ${r1(it.c)} · G ${r1(it.f)}</span></label>
+        <input type="number" value="${it.grams}" min="1" data-ai-g="${i}" aria-label="grammi"></div>`).join("")}</div>
+      <p class="note">Correggi i grammi se serve: le calorie si aggiornano. Le stime da foto possono sbagliare del 20-30%.</p>
+      <div class="grid2"><button class="btn" data-act="aireset">Nuova stima</button><button class="btn primary" data-act="aiadd">Aggiungi</button></div>`;
+  }
+  return `<div class="stack">
+      <label class="f">Descrivi cosa hai mangiato<textarea id="aitext" placeholder="Es. un piatto di pasta al pomodoro, un'insalata con tonno e un bicchiere di vino">${esc(s.aiText || "")}</textarea></label>
+      <label class="btn block" style="text-align:center">${s.photo ? "Cambia foto" : "Scatta o scegli una foto del piatto"}<input type="file" id="aiphoto" accept="image/*" capture="environment" hidden></label>
+      ${s.photo ? `<img class="photo-prev" src="${s.photo}" alt="Foto del piatto">` : ""}
+      ${s.err ? `<p class="err">${esc(s.err)}</p>` : ""}
+      <button class="btn primary block" data-act="aigo" ${s.busy ? "disabled" : ""}>${s.busy ? "Sto analizzando…" : "Stima calorie"}</button>
+    </div>`;
+}
+function barcodeView(s) {
+  const hasDetector = "BarcodeDetector" in window;
+  return `<div class="stack">
+      <p class="note">Fotografa il codice a barre della confezione oppure scrivi le cifre. I valori arrivano da Open Food Facts, la banca dati libera dei prodotti.</p>
+      ${hasDetector ? `<label class="btn block" style="text-align:center">Fotografa il codice a barre<input type="file" id="bcphoto" accept="image/*" capture="environment" hidden></label>` : ""}
+      <form id="bcform" class="row"><input type="text" inputmode="numeric" id="bccode" placeholder="Es. 8076809513753" value="${esc(s.bcCode || "")}"><button class="btn primary" type="submit" ${s.busy ? "disabled" : ""}>Cerca</button></form>
+      ${s.busy ? `<p class="note">Cerco il prodotto…</p>` : ""}
+      ${s.err ? `<p class="err">${esc(s.err)}</p>` : ""}
+    </div>`;
+}
+function manualView(s) {
+  return `<form id="mform" class="stack">
+      <label class="f">Nome<input type="text" id="mname" required placeholder="Es. Lasagne della mamma"></label>
+      <div class="grid2">
+        <label class="f">Quantità (g)<input type="number" id="mgrams" value="100" min="1"></label>
+        <label class="f">Calorie (kcal)<input type="number" id="mkcal" required min="0"></label>
+      </div>
+      <div class="grid2" style="grid-template-columns:1fr 1fr 1fr">
+        <label class="f">Proteine (g)<input type="text" inputmode="decimal" id="mp" value="0"></label>
+        <label class="f">Carboidrati (g)<input type="text" inputmode="decimal" id="mc" value="0"></label>
+        <label class="f">Grassi (g)<input type="text" inputmode="decimal" id="mf" value="0"></label>
+      </div>
+      <label class="row small"><input type="checkbox" id="msave"> Salva tra i miei cibi</label>
+      <button class="btn primary block" type="submit">Aggiungi</button>
+    </form>`;
+}
+
+/* ---------- AI: stima calorie con Claude ---------- */
+const AI_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["items", "note"],
+  properties: {
+    note: { type: "string" },
+    items: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "grams", "kcal", "protein", "carbs", "fat"],
+        properties: {
+          name: { type: "string" }, grams: { type: "number" }, kcal: { type: "number" },
+          protein: { type: "number" }, carbs: { type: "number" }, fat: { type: "number" },
+        },
+      },
+    },
+  },
+};
+const AI_SYSTEM = `Sei un nutrizionista che stima le calorie dei pasti per un diario alimentare italiano.
+Dalla foto e/o dalla descrizione individua ogni alimento separato (condimenti compresi, ad esempio l'olio), stima la quantità in grammi e calcola calorie e macronutrienti per quella quantità usando valori medi delle tabelle di composizione italiane.
+Se la porzione non è chiara assumi una porzione italiana tipica. Nomi degli alimenti brevi, in italiano.
+In "note" scrivi in una frase cosa hai riconosciuto e le assunzioni principali. Se l'immagine non mostra cibo restituisci items vuoto e spiegalo in note.`;
+
+async function callClaude(content) {
+  const body = {
+    model: state.settings.model || MODELS[0].id,
+    max_tokens: 4000,
+    system: AI_SYSTEM,
+    output_config: { effort: "low", format: { type: "json_schema", schema: AI_SCHEMA } },
+    messages: [{ role: "user", content }],
+    fallbacks: "default",
+  };
+  const headers = {
+    "content-type": "application/json",
+    "x-api-key": state.settings.apiKey,
+    "anthropic-version": "2023-06-01",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "anthropic-beta": "server-side-fallback-2026-07-01",
+  };
+  let res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers, body: JSON.stringify(body) });
+  if (res.status === 400) {
+    // riprova senza il fallback lato server, nel caso l'account non lo supporti
+    const txt = await res.clone().text();
+    if (/fallback/i.test(txt)) {
+      delete body.fallbacks; delete headers["anthropic-beta"];
+      res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers, body: JSON.stringify(body) });
+    }
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("Chiave API non valida. Controllala nel profilo.");
+    if (res.status === 429) throw new Error("Troppe richieste o credito esaurito. Riprova tra poco.");
+    throw new Error(data?.error?.message || `Errore ${res.status} dal servizio AI.`);
+  }
+  if (data.stop_reason === "refusal") throw new Error("Il modello non ha potuto analizzare questa richiesta. Prova con una descrizione.");
+  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+  return JSON.parse(text);
+}
+
+function resizeImage(file, max = 1024) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL("image/jpeg", 0.85));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Immagine non leggibile.")); };
+    img.src = url;
+  });
+}
+
+async function runAI() {
+  const s = ui.sheet;
+  s.aiText = $("#aitext")?.value.trim() || "";
+  if (!s.aiText && !s.photo) { s.err = "Scrivi cosa hai mangiato o aggiungi una foto."; renderSheet(); return; }
+  s.err = ""; s.busy = true; renderSheet();
+  try {
+    const content = [];
+    if (s.photo) content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: s.photo.split(",")[1] } });
+    content.push({ type: "text", text: s.aiText ? `Pasto: ${s.aiText}` : "Stima il pasto nella foto." });
+    const out = await callClaude(content);
+    const items = (out.items || []).map((x) => ({
+      name: x.name, grams: r0(x.grams) || 100, on: true,
+      per: x.grams > 0 ? { kcal: (x.kcal * 100) / x.grams, p: (x.protein * 100) / x.grams, c: (x.carbs * 100) / x.grams, f: (x.fat * 100) / x.grams } : null,
+      kcal: x.kcal, p: x.protein, c: x.carbs, f: x.fat,
+    }));
+    if (!items.length) throw new Error(out.note || "Non ho riconosciuto alimenti.");
+    s.ai = { items, note: out.note };
+  } catch (e) {
+    s.err = e instanceof TypeError ? "Connessione al servizio AI non riuscita. Controlla la rete e riprova." : e.message;
+  }
+  s.busy = false;
+  if (ui.sheet === s) renderSheet();
+}
+
+/* ---------- barcode ---------- */
+async function lookupBarcode(code) {
+  const s = ui.sheet;
+  code = String(code).replace(/\D/g, "");
+  if (code.length < 8) { s.err = "Il codice deve avere almeno 8 cifre."; renderSheet(); return; }
+  s.bcCode = code; s.err = ""; s.busy = true; renderSheet();
+  try {
+    const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${code}.json?fields=product_name,product_name_it,brands,nutriments,serving_quantity`);
+    const data = await res.json();
+    const p = data.product;
+    const n = p?.nutriments || {};
+    const kcal = n["energy-kcal_100g"] ?? (n["energy_100g"] ? n["energy_100g"] / 4.184 : null);
+    if (!p || kcal == null) throw new Error("Prodotto non trovato o senza valori nutrizionali. Aggiungilo a mano.");
+    const name = [p.product_name_it || p.product_name || "Prodotto " + code, p.brands?.split(",")[0]].filter(Boolean).join(" · ");
+    const serving = parseFloat(p.serving_quantity) || 0;
+    s.pick = { name, kcal: +kcal, p: +(n.proteins_100g || 0), c: +(n.carbohydrates_100g || 0), f: +(n.fat_100g || 0), portion: serving ? r0(serving) : 0, portionLabel: serving ? "porzione" : "", src: "off" };
+    s.grams = serving ? r0(serving) : 100;
+  } catch (e) {
+    s.err = e instanceof TypeError ? "Connessione non riuscita. Controlla la rete." : e.message;
+  }
+  s.busy = false;
+  if (ui.sheet === s) renderSheet();
+}
+async function scanBarcodePhoto(file) {
+  const s = ui.sheet;
+  try {
+    const det = new BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e"] });
+    const bmp = await createImageBitmap(file);
+    const codes = await det.detect(bmp);
+    if (!codes.length) throw new Error("Non trovo un codice nella foto. Avvicinati e riprova, oppure scrivi le cifre.");
+    await lookupBarcode(codes[0].rawValue);
+  } catch (e) { s.err = e.message; renderSheet(); }
+}
+
+/* ---------- azioni ---------- */
+let toastT;
+function toast(msg) {
+  let el = $(".toast");
+  if (!el) { el = document.createElement("div"); el.className = "toast"; el.setAttribute("role", "status"); document.body.appendChild(el); }
+  el.textContent = msg; el.hidden = false;
+  clearTimeout(toastT); toastT = setTimeout(() => (el.hidden = true), 2200);
+}
+function addItems(items) {
+  const d = day(ui.date);
+  d.items.push(...items);
+  items.forEach((i) => remember(i.name));
+  save();
+}
+
+document.addEventListener("click", async (ev) => {
+  const tabEl = ev.target.closest("[data-tab]");
+  if (tabEl) { ui.tab = tabEl.dataset.tab; ui.confirmReset = false; try { localStorage.setItem(STORE_KEY + ".tab", ui.tab); } catch (e) {} render(); window.scrollTo(0, 0); return; }
+  const el = ev.target.closest("[data-act]");
+  if (!el) return;
+  const act = el.dataset.act;
+  const s = ui.sheet;
+  switch (act) {
+    case "scrim": if (ev.target === el) closeSheet(); return;
+    case "prev": ui.date = addDays(ui.date, -1); render(); return;
+    case "next": if (ui.date < todayKey()) { ui.date = addDays(ui.date, 1); render(); } return;
+    case "add": openAdd({ meal: el.dataset.meal, mode: el.dataset.mode }); return;
+    case "goprofile": ui.sheet = null; ui.tab = "profilo"; render(); return;
+    case "start": state = emptyState(); save(); ui.tab = "profilo"; render(); toast("Esempi cancellati. Compila il profilo."); return;
+    case "water": { const d = day(ui.date); const n = +el.dataset.n; d.water = d.water === n + 1 ? n : n + 1; save(); render(); return; }
+    case "edit": openEdit(el.dataset.id); return;
+    case "range": ui.range = +el.dataset.v; render(); return;
+    case "delw": state.weights = state.weights.filter((w) => w.date !== el.dataset.date); save(); render(); return;
+    case "delfood": state.myFoods.splice(+el.dataset.i, 1); save(); render(); toast("Cibo rimosso"); return;
+    case "meal": s.meal = el.dataset.meal; renderSheet(); return;
+    case "mode": s.mode = el.dataset.mode; s.pick = null; s.err = ""; renderSheet(); return;
+    case "pick": s.pick = ui._results[+el.dataset.i]; s.grams = s.pick.portion || 100; renderSheet(); return;
+    case "unpick": s.pick = null; renderSheet(); return;
+    case "grams": s.grams = +el.dataset.g; renderSheet(); return;
+    case "addpick": {
+      const g = parseNum($("#pgrams").value) || s.grams;
+      const f = s.pick;
+      if ($("#savemine")?.checked && !state.myFoods.some((m) => m.name === f.name)) state.myFoods.unshift({ name: f.name, kcal: f.kcal, p: f.p, c: f.c, f: f.f, portion: f.portion, portionLabel: f.portionLabel });
+      addItems([itemFrom(f, g, s.meal)]);
+      closeSheet(); render(); toast(`${f.name} aggiunto`); return;
+    }
+    case "aigo": runAI(); return;
+    case "aireset": s.ai = null; s.photo = null; s.aiText = ""; renderSheet(); return;
+    case "aitoggle": s.ai.items[+el.dataset.i].on = el.checked; return;
+    case "aiadd": {
+      const sel = s.ai.items.filter((i) => i.on);
+      if (!sel.length) return;
+      addItems(sel.map((i) => ({ id: uid(), meal: s.meal, name: i.name, grams: i.grams, kcal: r0(i.kcal), p: r1(i.p), c: r1(i.c), f: r1(i.f), per: i.per, src: "ai" })));
+      closeSheet(); render(); toast(`${sel.length} alimenti aggiunti`); return;
+    }
+    case "delitem": { const d = day(ui.date); d.items = d.items.filter((i) => i.id !== s.id); save(); closeSheet(); render(); toast("Eliminato"); return; }
+    case "saveitem": {
+      const it = day(ui.date).items.find((i) => i.id === s.id);
+      it.meal = s.meal;
+      if (it.per) { const g = parseNum($("#egrams").value) || it.grams; const n = scale(it.per, g); Object.assign(it, { grams: r0(g), kcal: r0(n.kcal), p: r1(n.p), c: r1(n.c), f: r1(n.f) }); }
+      else it.kcal = r0(parseNum($("#ekcal").value));
+      save(); closeSheet(); render(); return;
+    }
+    case "export": {
+      const json = JSON.stringify({ app: "bilancino", version: 1, exported: new Date().toISOString(), data: { ...state, settings: { ...state.settings, apiKey: "" } } }, null, 1);
+      const msg = $("#datamsg");
+      try {
+        const blob = new Blob([json], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob); a.download = `bilancino-backup-${todayKey()}.json`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      } catch (e) {}
+      try { await navigator.clipboard.writeText(json); msg.textContent = "Backup scaricato e copiato negli appunti (la chiave API non è inclusa)."; }
+      catch (e) { msg.textContent = "Backup scaricato (la chiave API non è inclusa)."; }
+      return;
+    }
+    case "import": $("#importfile").click(); return;
+    case "reset":
+      if (!ui.confirmReset) { ui.confirmReset = true; render(); return; }
+      ui.confirmReset = false; state = emptyState(); save(); render(); toast("Dati cancellati"); return;
+  }
+});
+
+document.addEventListener("input", (ev) => {
+  const s = ui.sheet;
+  if (ev.target.id === "q") { s.q = ev.target.value; $("#reslist").innerHTML = resultsHTML(s.q); }
+  if (ev.target.id === "pgrams") { s.grams = parseNum(ev.target.value); $("#pnutr").innerHTML = nutrBlock(scale(s.pick, s.grams)); }
+  if (ev.target.id === "egrams") {
+    const it = day(ui.date).items.find((i) => i.id === s.id);
+    s.grams = parseNum(ev.target.value);
+    const n = ev.target.parentElement.parentElement.querySelector(".nutr");
+    if (n && it.per) n.outerHTML = nutrBlock(scale(it.per, s.grams));
+  }
+  if (ev.target.dataset.aiG != null) {
+    const i = +ev.target.dataset.aiG, it = s.ai.items[i], g = parseNum(ev.target.value);
+    if (it.per && g > 0) { const n = scale(it.per, g); Object.assign(it, { grams: r0(g), kcal: n.kcal, p: n.p, c: n.c, f: n.f }); $("#aik" + i).textContent = `${r0(it.kcal)} kcal · P ${r1(it.p)} · C ${r1(it.c)} · G ${r1(it.f)}`; }
+  }
+});
+
+document.addEventListener("change", async (ev) => {
+  const s = ui.sheet;
+  if (ev.target.id === "aiphoto" && ev.target.files[0]) {
+    s.aiText = $("#aitext")?.value || "";
+    try { s.photo = await resizeImage(ev.target.files[0]); s.err = ""; } catch (e) { s.err = e.message; }
+    renderSheet();
+  }
+  if (ev.target.id === "bcphoto" && ev.target.files[0]) scanBarcodePhoto(ev.target.files[0]);
+  if (ev.target.id === "importfile" && ev.target.files[0]) {
+    const msg = $("#datamsg");
+    try {
+      const obj = JSON.parse(await ev.target.files[0].text());
+      const data = obj.data || obj;
+      if (!data.days || !data.weights) throw new Error();
+      const key = state.settings.apiKey;
+      state = Object.assign(emptyState(), data, { demo: false });
+      state.settings.apiKey = state.settings.apiKey || key;
+      save(); render(); toast("Backup importato");
+    } catch (e) { msg.textContent = "Il file non è un backup di Bilancino valido."; msg.className = "err"; }
+  }
+});
+
+document.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const id = ev.target.id;
+  if (id === "wform") {
+    const kg = parseNum($("#wkg").value), date = $("#wdate").value || todayKey();
+    if (kg < 30 || kg > 300) { toast("Inserisci un peso tra 30 e 300 kg"); return; }
+    state.weights = state.weights.filter((w) => w.date !== date).concat({ date, kg: r1(kg) });
+    if (state.profile && date === todayKey()) state.profile.weight = r1(kg);
+    save(); render(); toast("Pesata salvata");
+  }
+  if (id === "pform") {
+    const p = {
+      sex: $("#psex").value, age: parseNum($("#page").value), height: parseNum($("#pheight").value),
+      weight: r1(parseNum($("#pweight").value)), goal: r1(parseNum($("#pgoal").value)),
+      rate: parseNum($("#prate").value), activity: parseNum($("#pact").value), diet: $("#pdiet").value,
+      start: state.profile?.start || todayKey(),
+    };
+    if (!p.age || !p.height || !p.weight || !p.goal) { toast("Compila età, altezza e pesi"); return; }
+    const hadWeights = state.weights.length;
+    state.profile = p;
+    if (!hadWeights || currentWeight() !== p.weight) state.weights = state.weights.filter((w) => w.date !== todayKey()).concat({ date: todayKey(), kg: p.weight });
+    save(); render(); toast(`Obiettivo: ${targets().kcal} kcal al giorno`);
+  }
+  if (id === "aiform") {
+    state.settings.apiKey = $("#apikey").value.trim();
+    state.settings.model = $("#aimodel").value;
+    save(); toast("Impostazioni AI salvate");
+  }
+  if (id === "mform") {
+    const g = parseNum($("#mgrams").value) || 100, kcal = parseNum($("#mkcal").value);
+    const name = $("#mname").value.trim();
+    const p = parseNum($("#mp").value), c = parseNum($("#mc").value), f = parseNum($("#mf").value);
+    const per = { name, kcal: (kcal * 100) / g, p: (p * 100) / g, c: (c * 100) / g, f: (f * 100) / g, portion: r0(g), portionLabel: "porzione", src: "mio" };
+    if ($("#msave").checked) state.myFoods.unshift({ ...per, src: undefined });
+    addItems([itemFrom(per, g, ui.sheet.meal)]);
+    closeSheet(); render(); toast(`${name} aggiunto`);
+  }
+  if (id === "bcform") lookupBarcode($("#bccode").value);
+});
+
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && ui.sheet) closeSheet(); });
+
+render();
+
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
