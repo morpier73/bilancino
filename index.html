@@ -438,6 +438,7 @@ const ICON = {
   trend: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18l5-6 4 3 7-9"/><path d="M15 6h5v5"/></svg>',
   foods: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11h16a8 8 0 0 1-16 0z"/><path d="M9 7c0-2 2-2 2-4M14 7c0-2 2-2 2-4"/></svg>',
   user: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>',
+  camera: '<svg width="20" height="20" style="vertical-align:-4px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
   logo: '<svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="9" width="26" height="20" rx="6" fill="var(--accent)"/><circle cx="16" cy="19" r="6" fill="var(--surface)"/><path d="M16 19l3-3.4" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/><rect x="12" y="4" width="8" height="4" rx="2" fill="var(--accent)"/></svg>',
 };
 
@@ -452,7 +453,7 @@ function render() {
   app.innerHTML = `
     <header class="top">
       <div class="brand">${ICON.logo}<span>Bilancino</span></div>
-      ${showDate ? `<div class="datenav">
+      ${showDate ? `<button class="iconbtn" data-act="camera" aria-label="Fotografa il pasto">${ICON.camera}</button><div class="datenav">
         <button class="iconbtn" data-act="prev" aria-label="Giorno precedente">${ICON.left}</button>
         <span class="label num">${esc(fmtDay(ui.date))}</span>
         <button class="iconbtn" data-act="next" aria-label="Giorno successivo" ${ui.date >= todayKey() ? "disabled" : ""}>${ICON.right}</button>
@@ -771,7 +772,7 @@ function aiView(s) {
   }
   return `<div class="stack">
       <label class="f">Descrivi cosa hai mangiato<textarea id="aitext" placeholder="Es. un piatto di pasta al pomodoro, un'insalata con tonno e un bicchiere di vino">${esc(s.aiText || "")}</textarea></label>
-      <label class="btn block" style="text-align:center">${s.photo ? "Cambia foto" : "Scatta o scegli una foto del piatto"}<input type="file" id="aiphoto" accept="image/*" capture="environment" hidden></label>
+      <div class="grid2"><label class="btn primary" style="text-align:center">${ICON.camera} ${s.photo ? "Rifai foto" : "Scatta foto"}<input type="file" id="aiphoto" accept="image/*" capture="environment" hidden></label><label class="btn" style="text-align:center">Dalla galleria<input type="file" id="aiphoto2" accept="image/*" hidden></label></div>
       ${s.photo ? `<img class="photo-prev" src="${s.photo}" alt="Foto del piatto">` : ""}
       ${s.err ? `<p class="err">${esc(s.err)}</p>` : ""}
       <button class="btn primary block" data-act="aigo" ${s.busy ? "disabled" : ""}>${s.busy ? "Sto analizzando…" : "Stima calorie"}</button>
@@ -968,6 +969,7 @@ document.addEventListener("click", async (ev) => {
     case "prev": ui.date = addDays(ui.date, -1); render(); return;
     case "next": if (ui.date < todayKey()) { ui.date = addDays(ui.date, 1); render(); } return;
     case "add": openAdd({ meal: el.dataset.meal, mode: el.dataset.mode }); return;
+    case "camera": openAdd({ mode: "ai" }); ui.sheet.auto = true; $("#aiphoto")?.click(); return;
     case "goprofile": ui.sheet = null; ui.tab = "profilo"; render(); return;
     case "start": state = emptyState(); save(); ui.tab = "profilo"; render(); toast("Esempi cancellati. Compila il profilo."); return;
     case "water": { const d = day(ui.date); const n = +el.dataset.n; d.water = d.water === n + 1 ? n : n + 1; save(); render(); return; }
@@ -1043,10 +1045,11 @@ document.addEventListener("input", (ev) => {
 
 document.addEventListener("change", async (ev) => {
   const s = ui.sheet;
-  if (ev.target.id === "aiphoto" && ev.target.files[0]) {
+  if ((ev.target.id === "aiphoto" || ev.target.id === "aiphoto2") && ev.target.files[0]) {
     s.aiText = $("#aitext")?.value || "";
     try { s.photo = await resizeImage(ev.target.files[0]); s.err = ""; } catch (e) { s.err = e.message; }
     renderSheet();
+    if (s.auto && s.photo) { s.auto = false; runAI(); }
   }
   if (ev.target.id === "bcphoto" && ev.target.files[0]) scanBarcodePhoto(ev.target.files[0]);
   if (ev.target.id === "importfile" && ev.target.files[0]) {
@@ -1107,7 +1110,7 @@ document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && ui.she
 
 render();
 
-if ("serviceWorker" in navigator && location.protocol === "https:") {
+if ("serviceWorker" in navigator && location.protocol === "https:" && !window.Capacitor) {
   navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 
