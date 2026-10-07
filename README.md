@@ -13,11 +13,18 @@ i dati restano nel telefono (memoria del browser). Funziona anche offline.
 
 ## File
 - `src/` sorgenti (app.js, app.css, foods.js, sw.js, manifest)
-- `dist/` app pronta da pubblicare su un qualsiasi hosting HTTPS statico
-- `preview.html` versione per l'anteprima su claude.ai
-- `python3 build.py` rigenera `dist/` e `preview.html`
+- `index.html`, `sw.js`, `manifest.webmanifest`, icone: app pronta (GitHub Pages)
+- `preview.html` (non versionato) versione per l'anteprima su claude.ai
+- `python3 build.py` rigenera i file dell'app e `preview.html`
 
 ## Installare su Android
-Carica il contenuto di `dist/` su un hosting HTTPS (GitHub Pages, Netlify, Cloudflare Pages),
-apri l'indirizzo con Chrome e scegli "Installa app" / "Aggiungi a schermata Home".
+Apri https://morpier73.github.io/bilancino/ con Chrome e scegli "Installa app",
+oppure installa l'APK (sotto).
 Il codice è pubblico ma i dati no: restano sul telefono.
+
+## APK Android
+Ogni push su `main` compila l'APK (cartella `android-app/`, Capacitor) con GitHub Actions
+e lo pubblica nelle Release: https://github.com/morpier73/bilancino/releases/latest
+L'APK è firmato con `android-app/debug.keystore` (creata dal primo giro di Actions),
+sempre la stessa chiave, così gli aggiornamenti si installano sopra senza perdere i dati.
+Il workflow rigenera anche `index.html` e gli altri file della web app da `src/`.

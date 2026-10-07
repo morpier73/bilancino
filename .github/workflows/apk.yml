@@ -1,0 +1,87 @@
+# Compila l'APK Android di Bilancino e lo pubblica come release.
+name: APK Android
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Rigenera la web app da src/
+        run: |
+          pip install --quiet pillow
+          python3 build.py
+          # chiave di firma fissa: creata al primo giro e poi riusata, così gli aggiornamenti si installano sopra
+          if [ ! -f android-app/debug.keystore ]; then
+            keytool -genkeypair -keystore android-app/debug.keystore -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          if [ -n "$(git status --porcelain -- index.html sw.js manifest.webmanifest icon-192.png icon-512.png android-app/debug.keystore)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898+github-actions[bot]@users.noreply.github.com"
+            git add index.html sw.js manifest.webmanifest icon-192.png icon-512.png android-app/debug.keystore
+            git commit -m "Rigenera la web app da src/"
+            git push
+          fi
+
+      - name: Prepara il progetto Capacitor
+        working-directory: android-app
+        run: |
+          mkdir -p www
+          cp ../index.html ../sw.js ../manifest.webmanifest ../icon-192.png ../icon-512.png www/
+          npm install --no-audit --no-fund
+          npx cap add android
+          npx cap sync android
+
+      - name: Icone, permessi e versione
+        working-directory: android-app/android
+        run: |
+          sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.CAMERA" />#' app/src/main/AndroidManifest.xml
+          rm -rf app/src/main/res/mipmap-anydpi-v26
+          for d in app/src/main/res/mipmap-*; do
+            for f in ic_launcher.png ic_launcher_round.png ic_launcher_foreground.png; do
+              if [ -f "$d/$f" ]; then
+                size=$(identify -format '%w' "$d/$f")
+                convert ../../icon-512.png -resize ${size}x${size} "$d/$f"
+              fi
+            done
+          done
+          sed -i "s/versionCode [0-9]*/versionCode ${{ github.run_number }}/; s/versionName \"[^\"]*\"/versionName \"1.${{ github.run_number }}\"/" app/build.gradle
+          grep -n "versionCode\|versionName" app/build.gradle
+          grep -n "permission" app/src/main/AndroidManifest.xml
+
+      - name: Compila l'APK
+        working-directory: android-app/android
+        run: |
+          mkdir -p ~/.android
+          cp ../debug.keystore ~/.android/debug.keystore
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../../bilancino.apk
+
+      - name: Pubblica la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="apk-${{ github.run_number }}"
+          gh release create "$tag" bilancino.apk \
+            --title "Bilancino 1.${{ github.run_number }}" \
+            --notes "APK per Android. Scarica bilancino.apk sul telefono e aprilo per installarlo." \
+            --latest

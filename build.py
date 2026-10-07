@@ -1,10 +1,9 @@
-# Assembla la PWA (dist/) e la pagina di anteprima (preview.html) dai file in src/.
+# Assembla la PWA (nella cartella del repository) e la pagina di anteprima (preview.html, ignorata da git) dai file in src/.
 from pathlib import Path
 from PIL import Image, ImageDraw
 import shutil
 root = Path(__file__).parent
-src, dist = root / "src", root / "dist"
-dist.mkdir(exist_ok=True)
+src, dist = root / "src", root
 css, foods, app = (src / "app.css").read_text(), (src / "foods.js").read_text(), (src / "app.js").read_text()
 fonts = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Figtree:wght@400;500;600;700&display=swap">'
 body = f'<div class="app" id="app"></div>\n<div id="sheet"></div>\n<nav class="tabbar" id="tabbar"></nav>\n<script>\n{foods}\n{app}\n</script>'

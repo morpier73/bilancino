@@ -1,0 +1,11 @@
+{
+  "name": "bilancino-android",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Guscio Android (Capacitor) per Bilancino",
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/cli": "^7.0.0",
+    "@capacitor/core": "^7.0.0"
+  }
+}

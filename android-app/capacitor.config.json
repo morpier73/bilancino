@@ -1,0 +1,8 @@
+{
+  "appId": "it.morpier.bilancino",
+  "appName": "Bilancino",
+  "webDir": "www",
+  "android": {
+    "adjustMarginsForEdgeToEdge": "force"
+  }
+}
