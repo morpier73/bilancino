@@ -7,6 +7,7 @@ const MEALS = [
   { id: "pranzo", label: "Pranzo" },
   { id: "cena", label: "Cena" },
   { id: "spuntini", label: "Spuntini" },
+  { id: "bevande", label: "Bevande" },
 ];
 const ACTIVITY = [
   { v: 1.2, label: "Sedentario (lavoro d'ufficio, poco movimento)" },
@@ -147,8 +148,10 @@ function remember(name) {
   state.recent = [name, ...state.recent.filter((n) => n !== name)].slice(0, 12);
 }
 function allFoods() {
-  return [...state.myFoods.map((f) => ({ ...f, src: "mio" })), ...FOOD_DB];
+  const names = new Set(FOOD_DB.map((f) => f.name));
+  return [...state.myFoods.map((f) => ({ ...f, src: "mio" })), ...FOOD_DB, ...DRINKS.filter((d) => d.name !== "Acqua" && !names.has(d.name))];
 }
+const norm = (x) => x.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
 /* ---------- interfaccia ---------- */
 const ui = { tab: "oggi", date: todayKey(), range: 90, sheet: null };
@@ -204,14 +207,17 @@ function viewToday() {
   const macro = (name, val, goal, color) => `<div class="macro">
       <div class="row between"><span>${name}</span><span class="num"><b>${r0(val)}</b> / ${goal} g</span></div>
       <div class="bar"><i style="width:${Math.min((val / goal) * 100, 100)}%;background:${color}"></i></div></div>`;
-  const meals = MEALS.map((m) => {
+  const itemLi = (i) => `<li data-act="edit" data-id="${i.id}">
+          <div class="name">${esc(i.name)}${i.src === "ai" ? '<span class="tag">AI</span>' : ""}<small class="num">${i.grams ? i.grams + (i.meal === "bevande" ? " ml · " : " g · ") : ""}P ${r0(i.p)} · C ${r0(i.c)} · G ${r0(i.f)}</small></div>
+          <span class="kcal num">${r0(i.kcal)}</span></li>`;
+  const drinks = d.items.filter((i) => i.meal === "bevande");
+  const ml = d.water * 250 + drinks.reduce((a, i) => a + (i.grams || 0), 0);
+  const meals = MEALS.filter((m) => m.id !== "bevande").map((m) => {
     const items = d.items.filter((i) => i.meal === m.id);
     const mt = totals(items);
     return `<section class="card">
       <div class="meal-head"><h2>${m.label}</h2><span class="muted small num">${r0(mt.kcal)} kcal</span></div>
-      ${items.length ? `<ul class="items">${items.map((i) => `<li data-act="edit" data-id="${i.id}">
-          <div class="name">${esc(i.name)}${i.src === "ai" ? '<span class="tag">AI</span>' : ""}<small class="num">${i.grams ? i.grams + " g · " : ""}P ${r0(i.p)} · C ${r0(i.c)} · G ${r0(i.f)}</small></div>
-          <span class="kcal num">${r0(i.kcal)}</span></li>`).join("")}</ul>` : ""}
+      ${items.length ? `<ul class="items">${items.map(itemLi).join("")}</ul>` : ""}
       <button class="addline" data-act="add" data-meal="${m.id}">+ Aggiungi a ${m.label.toLowerCase()}</button>
     </section>`;
   }).join("");
@@ -232,8 +238,12 @@ function viewToday() {
       <div class="kpis num"><span><b>${t.kcal}</b>obiettivo</span><span><b>${r0(tot.kcal)}</b>mangiate</span><span><b>${d.items.length}</b>alimenti</span></div>
     </section>
     <section class="card">
-      <div class="row between"><h2>Acqua</h2><span class="muted small num">${d.water} / ${WATER_GLASSES} bicchieri · ${fmtNum(d.water * 0.25, 2)} l</span></div>
+      <div class="row between"><h2>Acqua e bevande</h2><span class="muted small num">${fmtNum(ml / 1000, 2)} l · ${r0(totals(drinks).kcal)} kcal</span></div>
+      <div class="small muted num" style="margin-top:6px">Acqua: ${d.water} / ${WATER_GLASSES} bicchieri</div>
       <div class="glasses">${Array.from({ length: Math.max(WATER_GLASSES, d.water + 1) }, (_, i) => `<button class="glass ${i < d.water ? "full" : ""}" data-act="water" data-n="${i}" aria-label="${i + 1} bicchieri"></button>`).join("")}</div>
+      ${drinks.length ? `<ul class="items">${drinks.map(itemLi).join("")}</ul>` : ""}
+      <div class="small muted" style="margin:12px 0 6px">Tocca una bevanda per aggiungerla</div>
+      <div class="chips">${DRINKS.map((x, i) => x.name === "Acqua" ? "" : `<button class="chip" data-act="drink" data-i="${i}">${esc(x.name)}</button>`).join("")}</div>
     </section>
     ${meals}`;
 }
@@ -421,7 +431,7 @@ function openEdit(id) {
   ui.sheet = { kind: "edit", id, meal: it.meal, grams: it.grams, kcal: it.kcal };
   renderSheet();
 }
-function closeSheet() { ui.sheet = null; renderSheet(); }
+function closeSheet() { ui.sheet = null; ui.kb = false; renderSheet(); }
 
 function renderSheet() {
   const host = $("#sheet");
@@ -437,12 +447,12 @@ function renderSheet() {
       </div>
       <div class="grid2" style="margin-top:12px"><button class="btn danger" data-act="delitem">Elimina</button><button class="btn primary" data-act="saveitem">Salva</button></div>`;
   } else {
-    const modes = [["cerca", "Cerca"], ["ai", "Foto AI"], ["barcode", "Barcode"], ["manuale", "Manuale"]];
+    const modes = [["cerca", "Cerca"], ["ai", "Descrivi"], ["barcode", "Barcode"], ["manuale", "Manuale"]];
     inner = `<h3>Aggiungi a ${MEALS.find((m) => m.id === s.meal).label.toLowerCase()} · ${esc(fmtDay(ui.date).toLowerCase())}</h3>${mealChips}
       <div class="seg">${modes.map(([k, l]) => `<button class="${s.mode === k ? "on" : ""}" data-act="mode" data-mode="${k}">${l}</button>`).join("")}</div>
       ${s.pick ? portionView(s) : s.mode === "cerca" ? searchView(s) : s.mode === "ai" ? aiView(s) : s.mode === "barcode" ? barcodeView(s) : manualView(s)}`;
   }
-  host.innerHTML = `<div class="scrim" data-act="scrim"><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${inner}</div></div>`;
+  host.innerHTML = `<div class="scrim ${ui.kb ? "kb" : ""}" data-act="scrim"><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${inner}</div></div>`;
 }
 const scale = (per, g) => ({ kcal: (per.kcal * g) / 100, p: (per.p * g) / 100, c: (per.c * g) / 100, f: (per.f * g) / 100 });
 const nutrBlock = (n) => `<div class="nutr num"><span><b>${r0(n.kcal)}</b>kcal</span><span><b style="color:var(--prot)">${r1(n.p)}</b>proteine</span><span><b style="color:var(--carb)">${r1(n.c)}</b>carboidrati</span><span><b style="color:var(--fat)">${r1(n.f)}</b>grassi</span></div>`;
@@ -453,10 +463,14 @@ function searchResults(q) {
     const rec = state.recent.map((n) => foods.find((f) => f.name === n)).filter(Boolean);
     return { title: rec.length ? "Recenti" : "Suggeriti", list: rec.length ? rec : FOOD_DB.slice(0, 12) };
   }
-  const norm = (x) => x.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
   const words = norm(q).split(/\s+/).filter(Boolean);
-  const list = foods.filter((f) => words.every((w) => norm(f.name).includes(w)))
+  let list = foods.filter((f) => words.every((w) => norm(f.name).includes(w)))
     .sort((a, b) => norm(a.name).indexOf(words[0]) - norm(b.name).indexOf(words[0])).slice(0, 40);
+  if (!list.length) {
+    // nessun risultato con tutte le parole: cerca per singole parole (utile con le descrizioni)
+    const ws = wordsOf(q).filter((w) => !STOP.has(w) && !(w in NUM_WORDS) && !/^\d/.test(w)).map(stem);
+    list = foods.map((f) => ({ f, h: hits(ws, wordsOf(f.name).map(stem)) })).filter((x) => x.h).sort((a, b) => b.h - a.h).map((x) => x.f).slice(0, 20);
+  }
   return { title: `${list.length} risultati`, list };
 }
 function searchView(s) {
@@ -466,17 +480,19 @@ function searchView(s) {
 function resultsHTML(q) {
   const r = searchResults(q);
   ui._results = r.list;
-  return `<div class="eyebrow" style="margin-top:12px">${r.title}</div>
-    <ul class="results">${r.list.map((f, i) => `<li data-act="pick" data-i="${i}"><div class="name">${esc(f.name)}${f.src === "mio" ? '<span class="tag">MIO</span>' : ""}<small class="num">${r0(f.kcal)} kcal per 100 g${f.portion ? ` · ${f.portionLabel || "porzione"} ${f.portion} g` : ""}</small></div><span class="muted">${ICON.right}</span></li>`).join("")}</ul>
-    ${q && !r.list.length ? `<p class="note">Nessun risultato. Prova la stima con l'AI o aggiungilo a mano.</p><div class="grid2"><button class="btn" data-act="mode" data-mode="ai">Stima con AI</button><button class="btn" data-act="mode" data-mode="manuale">Aggiungi a mano</button></div>` : ""}`;
+  const many = q && norm(q).trim().split(/\s+/).length >= 2;
+  return `${many ? `<button class="btn primary block" style="margin-top:12px" data-act="describe">Calcola le calorie di “${esc(q.trim())}”</button>` : ""}
+    <div class="eyebrow" style="margin-top:12px">${r.title}</div>
+    <ul class="results">${r.list.map((f, i) => `<li data-act="pick" data-i="${i}"><div class="name">${esc(f.name)}${f.src === "mio" ? '<span class="tag">MIO</span>' : ""}<small class="num">${r0(f.kcal)} kcal per 100 ${f.drink ? "ml" : "g"}${f.portion ? ` · ${f.portionLabel || "porzione"} ${f.portion} ${f.drink ? "ml" : "g"}` : ""}</small></div><span class="muted">${ICON.right}</span></li>`).join("")}</ul>
+    ${q && !r.list.length ? `<p class="note">Nessun risultato. Prova a descriverlo o aggiungilo a mano.</p><button class="btn block" data-act="mode" data-mode="manuale">Aggiungi a mano</button>` : ""}`;
 }
 function portionView(s) {
   const f = s.pick;
   const quick = [...new Set([f.portion, 50, 100, 150, 200].filter(Boolean))];
   return `<div class="portion">
       <div class="row between"><b>${esc(f.name)}</b><button class="btn" style="padding:6px 10px" data-act="unpick">Cambia</button></div>
-      <label class="f">Quantità (g)<input type="number" id="pgrams" value="${s.grams}" min="1" inputmode="decimal"></label>
-      <div class="chips">${quick.map((g) => `<button class="chip ${s.grams == g ? "on" : ""}" data-act="grams" data-g="${g}">${g === f.portion && f.portionLabel ? f.portionLabel + " · " : ""}${g} g</button>`).join("")}</div>
+      <label class="f">Quantità (${f.drink ? "ml" : "g"})<input type="number" id="pgrams" value="${s.grams}" min="1" inputmode="decimal"></label>
+      <div class="chips">${quick.map((g) => `<button class="chip ${s.grams == g ? "on" : ""}" data-act="grams" data-g="${g}">${g === f.portion && f.portionLabel ? f.portionLabel + " · " : ""}${g} ${f.drink ? "ml" : "g"}</button>`).join("")}</div>
       <div id="pnutr">${nutrBlock(scale(f, s.grams))}</div>
       ${f.src === "off" ? `<label class="row small"><input type="checkbox" id="savemine" checked> Salva tra i miei cibi</label>` : ""}
     </div>
@@ -484,22 +500,22 @@ function portionView(s) {
 }
 function aiView(s) {
   const key = state.settings.apiKey;
-  if (!key) return `<p class="note">Per la stima con foto o testo serve la tua chiave API di Anthropic. Inseriscila nel profilo: resta salvata solo su questo telefono.</p><button class="btn primary block" data-act="goprofile">Apri impostazioni AI</button>`;
   if (s.ai?.items) {
-    return `<div class="eyebrow">Stima di Claude</div>
+    return `<div class="eyebrow">${s.ai.local ? "Calcolo dalla banca dati" : "Stima di Claude"}</div>
       ${s.ai.note ? `<p class="note" style="margin:6px 0">${esc(s.ai.note)}</p>` : ""}
       <div>${s.ai.items.map((it, i) => `<div class="ai-item"><input type="checkbox" id="aic${i}" ${it.on ? "checked" : ""} data-act="aitoggle" data-i="${i}">
         <label for="aic${i}"><b>${esc(it.name)}</b><br><span class="small muted num" id="aik${i}">${r0(it.kcal)} kcal · P ${r1(it.p)} · C ${r1(it.c)} · G ${r1(it.f)}</span></label>
-        <input type="number" value="${it.grams}" min="1" data-ai-g="${i}" aria-label="grammi"></div>`).join("")}</div>
-      <p class="note">Correggi i grammi se serve: le calorie si aggiornano. Le stime da foto possono sbagliare del 20-30%.</p>
+        <input type="number" value="${it.grams}" min="1" data-ai-g="${i}" aria-label="${it.drink ? "millilitri" : "grammi"}"><span class="small muted">${it.drink ? "ml" : "g"}</span></div>`).join("")}</div>
+      <p class="note">Correggi le quantità se serve: le calorie si aggiornano.${s.ai.local ? " Le bevande vanno tra le bevande, il resto nel pasto scelto." : " Le stime da foto possono sbagliare del 20-30%."}</p>
       <div class="grid2"><button class="btn" data-act="aireset">Nuova stima</button><button class="btn primary" data-act="aiadd">Aggiungi</button></div>`;
   }
   return `<div class="stack">
-      <label class="f">Descrivi cosa hai mangiato<textarea id="aitext" placeholder="Es. un piatto di pasta al pomodoro, un'insalata con tonno e un bicchiere di vino">${esc(s.aiText || "")}</textarea></label>
-      <div class="grid2"><label class="btn primary" style="text-align:center">${ICON.camera} ${s.photo ? "Rifai foto" : "Scatta foto"}<input type="file" id="aiphoto" accept="image/*" capture="environment" hidden></label><label class="btn" style="text-align:center">Dalla galleria<input type="file" id="aiphoto2" accept="image/*" hidden></label></div>
+      <label class="f">Descrivi cosa hai mangiato o bevuto<textarea id="aitext" placeholder="Es. 80 g di pasta, una mela, 2 uova e un bicchiere di vino">${esc(s.aiText || "")}</textarea></label>
+      ${key ? "" : `<p class="note" style="margin:0">Scrivi gli alimenti separati da virgole, con grammi o quantità (es. 2 uova, mezzo litro di birra). Per stimare anche dalle foto inserisci la tua chiave API nel <a href="#" data-act="goprofile">profilo</a>.</p>`}
+      ${key ? `<div class="grid2"><label class="btn primary" style="text-align:center">${ICON.camera} ${s.photo ? "Rifai foto" : "Scatta foto"}<input type="file" id="aiphoto" accept="image/*" capture="environment" hidden></label><label class="btn" style="text-align:center">Dalla galleria<input type="file" id="aiphoto2" accept="image/*" hidden></label></div>` : ""}
       ${s.photo ? `<img class="photo-prev" src="${s.photo}" alt="Foto del piatto">` : ""}
       ${s.err ? `<p class="err">${esc(s.err)}</p>` : ""}
-      <button class="btn primary block" data-act="aigo" ${s.busy ? "disabled" : ""}>${s.busy ? "Sto analizzando…" : "Stima calorie"}</button>
+      <button class="btn primary block" data-act="aigo" ${s.busy ? "disabled" : ""}>${s.busy ? "Sto analizzando…" : "Calcola calorie"}</button>
     </div>`;
 }
 function barcodeView(s) {
@@ -608,23 +624,69 @@ function resizeImage(file, max = 1024) {
   });
 }
 
+/* ---------- stima dalla descrizione, senza AI ---------- */
+const STOP = new Set("di da del dello della dei degli delle al allo alla ai agli alle col con in nel nella il lo la i gli le l un uno una per e ed o poi piu circa tipo bicchiere bicchieri tazza tazze tazzina tazzine piatto piatti piattino fetta fette pezzo pezzi porzione porzioni lattina lattine bottiglia bottiglie cucchiaio cucchiai cucchiaino cucchiaini manciata vasetto vasetti confezione bustina panino ho mangiato bevuto preso".split(" "));
+const NUM_WORDS = { un: 1, uno: 1, una: 1, mezzo: 0.5, mezza: 0.5, due: 2, tre: 3, quattro: 4, cinque: 5, sei: 6, sette: 7, otto: 8, nove: 9, dieci: 10, paio: 2, qualche: 2 };
+const UNITS = { kg: 1000, chilo: 1000, chili: 1000, g: 1, gr: 1, grammo: 1, grammi: 1, etto: 100, etti: 100, ml: 1, cl: 10, dl: 100, l: 1000, litro: 1000, litri: 1000 };
+const wordsOf = (x) => norm(x).replace(/'/g, " ").replace(/[^a-z0-9.,]+/g, " ").split(" ").filter(Boolean);
+const stem = (w) => (w.length > 3 ? w.replace(/[aeio]$/, "") : w);
+const same = (a, b) => a === b || (a.length >= 4 && b.startsWith(a)) || (b.length >= 4 && a.startsWith(b));
+const hits = (ws, fw) => ws.filter((w) => fw.some((x) => same(w, x))).length;
+function matchFood(text) {
+  const ws = wordsOf(text).filter((w) => !STOP.has(w) && !(w in NUM_WORDS) && !(w in UNITS) && !/^\d/.test(w)).map(stem);
+  if (!ws.length) return null;
+  let best = null, bestScore = 0;
+  for (const f of [...allFoods(), DRINKS[0]]) {
+    const fw = wordsOf(f.name).filter((w) => !STOP.has(w)).map(stem);
+    const h = hits(ws, fw);
+    if (!h) continue;
+    const score = h * 2 + (fw.some((x) => same(ws[0], x)) ? 1 : 0) - 0.3 * (fw.length - h);
+    if (score > bestScore) { best = f; bestScore = score; }
+  }
+  return best;
+}
+function estimateLocal(text) {
+  const parts = norm(text).split(/[,;+\n]|\s+(?:e|ed|piu|poi|con|anche)\s+/).map((x) => x.trim()).filter(Boolean);
+  const items = [], missed = [];
+  for (const part of parts) {
+    const f = matchFood(part);
+    if (!f) { if (wordsOf(part).some((w) => !STOP.has(w) && !(w in NUM_WORDS))) missed.push(part); continue; }
+    const ws = wordsOf(part);
+    let grams = 0, count = 1;
+    for (let i = 0; i < ws.length; i++) {
+      const m = ws[i].match(/^(\d+(?:[.,]\d+)?)([a-z]+)?$/);
+      const n = m ? parseFloat(m[1].replace(",", ".")) : NUM_WORDS[ws[i]];
+      if (n == null) continue;
+      const unit = m?.[2] || ws[i + 1];
+      if (unit in UNITS) { grams = n * UNITS[unit]; break; }
+      count = n;
+    }
+    if (!grams) grams = count * (f.portion || 100);
+    const k = grams / 100;
+    items.push({ name: f.name, grams: r0(grams), on: true, drink: !!f.drink, per: { kcal: f.kcal, p: f.p, c: f.c, f: f.f }, kcal: f.kcal * k, p: f.p * k, c: f.c * k, f: f.f * k });
+  }
+  const note = missed.length ? `Non ho trovato: ${missed.join(", ")}. Puoi aggiungerlo con Cerca o a mano.` : "";
+  return { items, note, local: true };
+}
+
 async function runAI() {
   const s = ui.sheet;
   s.aiText = $("#aitext")?.value.trim() || "";
   if (!s.aiText && !s.photo) { s.err = "Scrivi cosa hai mangiato o aggiungi una foto."; renderSheet(); return; }
+  if (!state.settings.apiKey && !s.aiText) { s.err = "Per le foto serve la chiave API nel profilo. Intanto puoi descrivere il pasto."; renderSheet(); return; }
   s.err = ""; s.busy = true; renderSheet();
   try {
     const content = [];
     if (s.photo) content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: s.photo.split(",")[1] } });
     content.push({ type: "text", text: s.aiText ? `Pasto: ${s.aiText}` : "Stima il pasto nella foto." });
-    const out = await callClaude(content);
-    const items = (out.items || []).map((x) => ({
+    const out = state.settings.apiKey ? await callClaude(content) : estimateLocal(s.aiText);
+    const items = out.local ? out.items : (out.items || []).map((x) => ({
       name: x.name, grams: r0(x.grams) || 100, on: true,
       per: x.grams > 0 ? { kcal: (x.kcal * 100) / x.grams, p: (x.protein * 100) / x.grams, c: (x.carbs * 100) / x.grams, f: (x.fat * 100) / x.grams } : null,
       kcal: x.kcal, p: x.protein, c: x.carbs, f: x.fat,
     }));
     if (!items.length) throw new Error(out.note || "Non ho riconosciuto alimenti.");
-    s.ai = { items, note: out.note };
+    s.ai = { items, note: out.note, local: !!out.local };
   } catch (e) {
     s.err = e instanceof TypeError ? "Connessione al servizio AI non riuscita. Controlla la rete e riprova." : e.message;
   }
@@ -693,8 +755,18 @@ document.addEventListener("click", async (ev) => {
     case "prev": ui.date = addDays(ui.date, -1); render(); return;
     case "next": if (ui.date < todayKey()) { ui.date = addDays(ui.date, 1); render(); } return;
     case "add": openAdd({ meal: el.dataset.meal, mode: el.dataset.mode }); return;
-    case "camera": openAdd({ mode: "ai" }); ui.sheet.auto = true; $("#aiphoto")?.click(); return;
-    case "goprofile": ui.sheet = null; ui.tab = "profilo"; render(); return;
+    case "camera":
+      openAdd({ mode: "ai" });
+      if (state.settings.apiKey) { ui.sheet.auto = true; $("#aiphoto")?.click(); }
+      else toast("Per le foto serve la chiave API nel profilo");
+      return;
+    case "drink": {
+      const x = DRINKS[+el.dataset.i];
+      addItems([itemFrom(x, x.portion, "bevande")]); render();
+      toast(`${x.name} aggiunto (${x.portion} ml · ${r0((x.kcal * x.portion) / 100)} kcal)`); return;
+    }
+    case "describe": s.mode = "ai"; s.pick = null; s.ai = null; s.aiText = s.q; s.err = ""; renderSheet(); runAI(); return;
+    case "goprofile": ev.preventDefault(); ui.kb = false; ui.sheet = null; ui.tab = "profilo"; render(); return;
     case "start": state = emptyState(); save(); ui.tab = "profilo"; render(); toast("Esempi cancellati. Compila il profilo."); return;
     case "water": { const d = day(ui.date); const n = +el.dataset.n; d.water = d.water === n + 1 ? n : n + 1; save(); render(); return; }
     case "edit": openEdit(el.dataset.id); return;
@@ -710,7 +782,7 @@ document.addEventListener("click", async (ev) => {
       const g = parseNum($("#pgrams").value) || s.grams;
       const f = s.pick;
       if ($("#savemine")?.checked && !state.myFoods.some((m) => m.name === f.name)) state.myFoods.unshift({ name: f.name, kcal: f.kcal, p: f.p, c: f.c, f: f.f, portion: f.portion, portionLabel: f.portionLabel });
-      addItems([itemFrom(f, g, s.meal)]);
+      addItems([itemFrom(f, g, f.drink ? "bevande" : s.meal)]);
       closeSheet(); render(); toast(`${f.name} aggiunto`); return;
     }
     case "aigo": runAI(); return;
@@ -719,7 +791,10 @@ document.addEventListener("click", async (ev) => {
     case "aiadd": {
       const sel = s.ai.items.filter((i) => i.on);
       if (!sel.length) return;
-      addItems(sel.map((i) => ({ id: uid(), meal: s.meal, name: i.name, grams: i.grams, kcal: r0(i.kcal), p: r1(i.p), c: r1(i.c), f: r1(i.f), per: i.per, src: "ai" })));
+      const d = day(ui.date);
+      const water = sel.filter((i) => i.name === "Acqua");
+      water.forEach((i) => (d.water += Math.max(1, Math.round(i.grams / 250))));
+      addItems(sel.filter((i) => i.name !== "Acqua").map((i) => ({ id: uid(), meal: i.drink ? "bevande" : s.meal, name: i.name, grams: i.grams, kcal: r0(i.kcal), p: r1(i.p), c: r1(i.c), f: r1(i.f), per: i.per, src: s.ai.local ? "db" : "ai" })));
       closeSheet(); render(); toast(`${sel.length} alimenti aggiunti`); return;
     }
     case "delitem": { const d = day(ui.date); d.items = d.items.filter((i) => i.id !== s.id); save(); closeSheet(); render(); toast("Eliminato"); return; }
@@ -828,6 +903,21 @@ document.addEventListener("submit", (ev) => {
     closeSheet(); render(); toast(`${name} aggiunto`);
   }
   if (id === "bcform") lookupBarcode($("#bccode").value);
+});
+
+const typing = (el) => el && (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && !["checkbox", "radio", "file", "button", "submit"].includes(el.type)));
+document.addEventListener("focusin", (ev) => {
+  if (!typing(ev.target) || !ev.target.closest(".sheet")) return;
+  ui.kb = true;
+  $(".scrim")?.classList.add("kb");
+  setTimeout(() => ev.target.scrollIntoView?.({ block: "nearest" }), 300);
+});
+document.addEventListener("focusout", () => {
+  setTimeout(() => {
+    if (typing(document.activeElement) && document.activeElement.closest(".sheet")) return;
+    ui.kb = false;
+    $(".scrim")?.classList.remove("kb");
+  }, 150);
 });
 
 document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && ui.sheet) closeSheet(); });

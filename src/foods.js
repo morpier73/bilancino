@@ -91,11 +91,29 @@ const FOOD_DB = [
   ["Gelato alla crema", 207, 3.5, 24, 11, 100, "1 coppetta"],
   ["Patatine in busta", 536, 7, 53, 34, 25, "1 busta piccola"],
   ["Barretta proteica", 360, 33, 35, 11, 50, "1 barretta"],
-  // Bevande
-  ["Caffè espresso", 2, 0.1, 0, 0, 30, "1 tazzina"],
-  ["Cappuccino", 46, 2.6, 4, 2, 150, "1 tazza"],
-  ["Vino rosso", 85, 0.1, 2.6, 0, 125, "1 bicchiere"],
-  ["Birra chiara", 43, 0.5, 3.6, 0, 330, "1 bottiglia"],
-  ["Succo d'arancia", 45, 0.7, 10, 0.2, 200, "1 bicchiere"],
-  ["Coca-Cola", 42, 0, 10.6, 0, 330, "1 lattina"],
 ].map(([name, kcal, p, c, f, portion, portionLabel]) => ({ name, kcal, p, c, f, portion, portionLabel, src: "db" }));
+
+// Bevande: valori per 100 ml, porzione tipica in ml. "Acqua" conta i bicchieri da 250 ml.
+const DRINKS = [
+  ["Acqua", 0, 0, 0, 0, 250, "1 bicchiere"],
+  ["Caffè espresso", 2, 0.1, 0, 0, 30, "1 tazzina"],
+  ["Caffè zuccherato", 18, 0.1, 4.2, 0, 30, "1 tazzina con 1 cucchiaino"],
+  ["Cappuccino", 46, 2.6, 4, 2, 150, "1 tazza"],
+  ["Tè senza zucchero", 1, 0, 0.2, 0, 250, "1 tazza"],
+  ["Tè freddo", 30, 0, 7.5, 0, 330, "1 lattina"],
+  ["Coca-Cola", 42, 0, 10.6, 0, 330, "1 lattina"],
+  ["Coca-Cola Zero", 0.3, 0, 0, 0, 330, "1 lattina"],
+  ["Aranciata", 38, 0, 9.5, 0, 330, "1 lattina"],
+  ["Succo di frutta", 50, 0.3, 12, 0.1, 200, "1 brick"],
+  ["Spremuta d'arancia", 45, 0.7, 10, 0.2, 200, "1 bicchiere"],
+  ["Latte parzialmente scremato", 46, 3.3, 5, 1.6, 200, "1 tazza"],
+  ["Bevanda energetica", 45, 0, 11, 0, 250, "1 lattina"],
+  ["Vino rosso", 85, 0.1, 2.6, 0, 125, "1 bicchiere"],
+  ["Vino bianco", 82, 0.1, 2.6, 0, 125, "1 bicchiere"],
+  ["Prosecco", 75, 0.1, 1.5, 0, 125, "1 flûte"],
+  ["Birra chiara", 43, 0.5, 3.6, 0, 330, "1 bottiglia"],
+  ["Birra analcolica", 22, 0.3, 4.8, 0, 330, "1 bottiglia"],
+  ["Spritz", 62, 0, 7, 0, 200, "1 bicchiere"],
+  ["Gin tonic", 85, 0, 8, 0, 200, "1 bicchiere"],
+  ["Amaro", 250, 0, 30, 0, 40, "1 bicchierino"],
+].map(([name, kcal, p, c, f, portion, portionLabel]) => ({ name, kcal, p, c, f, portion, portionLabel, src: "db", drink: true }));
