@@ -55,14 +55,15 @@ jobs:
         run: |
           sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.CAMERA" />#' app/src/main/AndroidManifest.xml
           rm -rf app/src/main/res/mipmap-anydpi-v26
-          for d in app/src/main/res/mipmap-*; do
-            for f in ic_launcher.png ic_launcher_round.png ic_launcher_foreground.png; do
-              if [ -f "$d/$f" ]; then
-                size=$(identify -format '%w' "$d/$f")
-                convert ../../icon-512.png -resize ${size}x${size} "$d/$f"
-              fi
-            done
-          done
+          python3 - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          icon = Image.open("../../icon-512.png")
+          for f in Path("app/src/main/res").glob("mipmap-*/ic_launcher*.png"):
+              size = Image.open(f).size
+              icon.resize(size, Image.LANCZOS).save(f)
+              print("icona", f, size)
+          PY
           sed -i "s/versionCode [0-9]*/versionCode ${{ github.run_number }}/; s/versionName \"[^\"]*\"/versionName \"1.${{ github.run_number }}\"/" app/build.gradle
           grep -n "versionCode\|versionName" app/build.gradle
           grep -n "permission" app/src/main/AndroidManifest.xml
